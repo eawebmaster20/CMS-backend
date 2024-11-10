@@ -25,7 +25,8 @@ const authDb = new sqlite3.Database('./db/auth.db', (err) => {
       `CREATE TABLE IF NOT EXISTS users (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
          email TEXT UNIQUE,
-         password TEXT
+         password TEXT,
+         username TEXT
        )`,
       (err) => {
         if (err) {
@@ -58,12 +59,28 @@ const membersDb = new sqlite3.Database('./db/members.db', (err) => {
          spouseId TEXT,
          isSpouseMember INTEGER
        )`,
+       
       (err) => {
         if (err) {
           console.error('Error creating members table:', err.message);
         }
       }
     );
+
+    membersDb.run(
+      `CREATE TABLE IF NOT EXISTS eventsTable (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         title TEXT UNIQUE,
+         start INTEGER, 
+         end INTEGER,
+         className TEXT
+       )`,
+       
+       (err) => {
+         if (err) {
+           console.error('Error creating members table:', err.message);
+         }
+       })
   }
 });
 
@@ -74,17 +91,17 @@ app.get('/api', (req, res) => {
 
 // User Registration (authDb)
 app.post('/api/register', (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, username } = req.body;
   authDb.get(`SELECT * FROM users WHERE email = ?`, [email], (err, row) => {
     if (err) {
-      return res.status(500).json({ error: 'Server error', details: err.message });
+      return res.status(500).json({ error: 'Server error', details: err });
     }
     if (row) {
       return res.status(400).json({ message: 'User already exists' });
     }
 
     const hashedPassword = bcrypt.hashSync(password, 10);
-    authDb.run(`INSERT INTO users (email, password) VALUES (?, ?)`, [email, hashedPassword], (err) => {
+    authDb.run(`INSERT INTO users (email, password, username) VALUES (?, ?, ?)`, [email, hashedPassword, username], (err) => {
       if (err) {
         return res.status(500).json({ error: 'Failed to register user', details: err.message });
       }
@@ -95,13 +112,14 @@ app.post('/api/register', (req, res) => {
 
 // User Login (authDb)
 app.post('/api/login', (req, res) => {
+  console.log('USER LOGIN');
   const { email, password } = req.body;
   authDb.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
     if (err) {
       return res.status(500).json({ error: 'Server error', details: err.message });
     }
     if (!user) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+      return res.status(400).json({ message: 'user doesn\'t exist' });
     }
 
     const isMatch = bcrypt.compareSync(password, user.password);
@@ -114,15 +132,6 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// Get Members (membersDb)
-app.get('/api/members', (req, res) => {
-  membersDb.all(`SELECT * FROM membersTable`, (err, rows) => {
-    if (err) {
-      return res.status(500).json({ error: 'Server error', details: err.message });
-    }
-    res.json(rows);
-  });
-});
 
 // Register Member (membersDb)
 app.post('/api/register-member', (req, res) => {
@@ -161,6 +170,101 @@ app.post('/api/register-member', (req, res) => {
         return res.status(500).json({ error: 'Failed to register member', details: err.message });
       }
       res.status(201).json({ message: 'Member registered successfully' });
+    }
+  );
+});
+
+// Get Members (membersDb)
+app.get('/api/members', (req, res) => {
+  membersDb.all(`SELECT * FROM membersTable`, (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: 'Server error', details: err.message });
+    }
+    res.json(rows);
+  });
+});
+
+
+app.post('/api/add-event', (req, res) => {
+  console.log('ADD EVENT')
+  membersDb.run(
+    `INSERT INTO eventsTable 
+      (
+        title,
+        start, 
+        end,
+        className
+      ) VALUES (?, ?, ?, ?)`,
+    [
+      req.body.title,
+      req.body.start, 
+      req.body.end,
+      req.body.className,
+    ], 
+    (err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to register member', details: err.message });
+      }
+      res.status(201).json({ message: 'Event Added successfully' });
+    }
+  );
+})
+
+
+app.get('/api/events', (req, res) => {
+  membersDb.all(`SELECT * FROM eventsTable`, (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: 'Server error', details: err.message });
+    }
+    res.json(rows);
+  });
+});
+
+// Get Members (membersDb)
+app.post('/api/update-event', (req, res) => {
+  const { id, title, className } = req.body;
+  
+  if (!id || !title || !className) {
+    console.log('UPDATE EVENT')
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  
+  membersDb.run(
+    `UPDATE eventsTable 
+    SET title = ?, className = ? 
+    WHERE id = ?`,
+    [title, className, id],
+    function (err) {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to update event', details: err.message });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Event not found' });
+      }
+      res.status(200).json({ message: 'Event updated successfully' });
+    }
+  );
+});
+
+
+app.delete('/api/delete-event/:id', (req, res) => {
+  const { id } = req.params;
+  console.log('DELETE EVENT')
+  if (!id) {
+    return res.status(400).json({ error: 'Missing event ID' });
+  }
+
+  membersDb.run(
+    `DELETE FROM eventsTable WHERE id = ?`,
+    [id],
+    function (err) {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to delete event', details: err.message });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Event not found' });
+      }
+      res.status(200).json({ message: 'Event deleted successfully' });
     }
   );
 });
