@@ -1,272 +1,174 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const bodyParser = require('body-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const swaggerUi = require('swagger-ui-express');
+const admin = require('firebase-admin');
 const setupSwagger = require('./swagger/swaggerConfig.js');
 
 dotenv.config();
 
+// Firebase Admin SDK init
+const serviceAccount = require('./serviceAccountKey.json');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://angular-auth-9fec9.firebaseio.com"
+});
+
+const db = admin.firestore();
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 setupSwagger(app);
 
-// Auth Database
-const authDb = new sqlite3.Database('./db/auth.db', (err) => {
-  if (err) {
-    console.error('Error opening auth database:', err.message);
-  } else {
-    console.log('Connected to auth.db');
-    authDb.run(
-      `CREATE TABLE IF NOT EXISTS users (
-         id INTEGER PRIMARY KEY AUTOINCREMENT,
-         email TEXT UNIQUE,
-         password TEXT,
-         username TEXT
-       )`,
-      (err) => {
-        if (err) {
-          console.error('Error creating users table:', err.message);
-        }
-      }
-    );
-  }
-});
-
-// Members Database
-const membersDb = new sqlite3.Database('./db/members.db', (err) => {
-  if (err) {
-    console.error('Error opening members database:', err.message);
-  } else {
-    console.log('Connected to members.db');
-    membersDb.run(
-      `CREATE TABLE IF NOT EXISTS membersTable (
-         id INTEGER PRIMARY KEY AUTOINCREMENT,
-         email TEXT UNIQUE,
-         firstName TEXT, 
-         lastName TEXT,
-         dateOfBirth TEXT,
-         homeAddress TEXT,
-         phoneNumber TEXT,
-         haveChildren INTEGER,
-         childrenIds TEXT,
-         isChildrenMember INTEGER,
-         maritalStatus INTEGER,
-         spouseId TEXT,
-         isSpouseMember INTEGER
-       )`,
-       
-      (err) => {
-        if (err) {
-          console.error('Error creating members table:', err.message);
-        }
-      }
-    );
-
-    membersDb.run(
-      `CREATE TABLE IF NOT EXISTS eventsTable (
-         id INTEGER PRIMARY KEY AUTOINCREMENT,
-         title TEXT UNIQUE,
-         start INTEGER, 
-         end INTEGER,
-         className TEXT
-       )`,
-       
-       (err) => {
-         if (err) {
-           console.error('Error creating members table:', err.message);
-         }
-       })
-  }
-});
-
+const saltRounds = 10;
 // Basic Route
 app.get('/api', (req, res) => {
   res.json('Hello, the server is up on port 5000');
 });
 
-// User Registration (authDb)
-app.post('/api/register', (req, res) => {
+// User Registration
+app.post('/api/register', async (req, res) => {
   const { email, password, username } = req.body;
-  authDb.get(`SELECT * FROM users WHERE email = ?`, [email], (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: 'Server error', details: err });
-    }
-    if (row) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
+  const hashedPassword = bcrypt.hashSync(password, saltRounds);
 
-    const hashedPassword = bcrypt.hashSync(password, 10);
-    authDb.run(`INSERT INTO users (email, password, username) VALUES (?, ?, ?)`, [email, hashedPassword, username], (err) => {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to register user', details: err.message });
-      }
-      res.status(201).json({ message: 'User registered successfully' });
+  try {
+    const userRecord = await admin.auth().createUser({
+      email,
+      password: hashedPassword,
+      displayName: username,
     });
-  });
+
+    await db.collection('users').doc(userRecord.uid).set({
+      email,
+      password: hashedPassword,
+      username,
+    });
+
+    res.status(201).json({ message: 'User registered successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to register user', details: err.message });
+  }
 });
 
-// User Login (authDb)
-app.post('/api/login', (req, res) => {
-  console.log('USER LOGIN');
+// User Login
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-  authDb.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
-    if (err) {
-      return res.status(500).json({ error: 'Server error', details: err.message });
-    }
-    if (!user) {
-      return res.status(400).json({ message: 'user doesn\'t exist' });
+
+  try {
+    const userSnapshot = await db.collection('users').where('email', '==', email).get();
+    if (userSnapshot.empty) {
+      return res.status(400).json({ message: "User doesn't exist" });
     }
 
+    const user = userSnapshot.docs[0].data();
     const isMatch = bcrypt.compareSync(password, user.password);
+
     if (!isMatch) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+      return res.status(400).json({ message: 'invalid credentials'});
     }
 
-    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
-  });
+    const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token, message:'success' });
+  } catch (error) {
+    console.error('Error logging in user:', error);
+    res.status(500).json({ error: 'Failed to login', details: error.message });
+  }
 });
 
-
-// Register Member (membersDb)
-app.post('/api/register-member', (req, res) => {
-  membersDb.run(
-    `INSERT INTO membersTable 
-      (
-        email,
-        firstName, 
-        lastName,
-        dateOfBirth,
-        homeAddress,
-        phoneNumber,
-        haveChildren,
-        childrenIds,
-        isChildrenMember,
-        maritalStatus,
-        spouseId,
-        isSpouseMember
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      req.body.email,
-      req.body.firstName, 
-      req.body.lastName,
-      req.body.dateOfBirth,
-      req.body.homeAddress,
-      req.body.phoneNumber,
-      req.body.haveChildren,
-      req.body.childrenIds,
-      req.body.isChildrenMember,
-      req.body.maritalStatus,
-      req.body.spouseId,
-      req.body.isSpouseMember,
-    ], 
-    (err) => {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to register member', details: err.message });
-      }
-      res.status(201).json({ message: 'Member registered successfully' });
-    }
-  );
+// Register Member
+app.post('/api/members/add', async (req, res) => {
+  try {
+    const memberData = req.body;
+    await db.collection('members').add(memberData);
+    res.status(201).json({ message: 'Member registered successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to register member', details: err.message });
+  }
 });
 
-// Get Members (membersDb)
-app.get('/api/members', (req, res) => {
-  membersDb.all(`SELECT * FROM membersTable`, (err, rows) => {
-    if (err) {
-      return res.status(500).json({ error: 'Server error', details: err.message });
-    }
-    res.json(rows);
-  });
+// Get Members
+app.get('/api/members/get-all', async (req, res) => {
+  try {
+    const membersSnapshot = await db.collection('members').get();
+    const members = membersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    res.json(members);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', details: err.message });
+  }
 });
 
+// get one member
 
-app.post('/api/add-event', (req, res) => {
-  console.log('ADD EVENT')
-  membersDb.run(
-    `INSERT INTO eventsTable 
-      (
-        title,
-        start, 
-        end,
-        className
-      ) VALUES (?, ?, ?, ?)`,
-    [
-      req.body.title,
-      req.body.start, 
-      req.body.end,
-      req.body.className,
-    ], 
-    (err) => {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to register member', details: err.message });
-      }
-      res.status(201).json({ message: 'Event Added successfully' });
+app.get('/api/members/get/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const memberSnapshot = await db.collection('members').doc(id).get();
+    if (!memberSnapshot.exists) {
+      return res.status(404).json({ error: 'Member not found' });
     }
-  );
-})
-
-
-app.get('/api/events', (req, res) => {
-  membersDb.all(`SELECT * FROM eventsTable`, (err, rows) => {
-    if (err) {
-      return res.status(500).json({ error: 'Server error', details: err.message });
-    }
-    res.json(rows);
-  });
+    const member = memberSnapshot.data();
+    res.json(member);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', details: err.message });
+  }
 });
 
-// Get Members (membersDb)
-app.post('/api/update-event', (req, res) => {
+// Add Event
+app.post('/api/add-event', async (req, res) => {
+  try {
+    const eventData = req.body;
+    await db.collection('events').add(eventData);
+    res.status(201).json({ message: 'Event added successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add event', details: err.message });
+  }
+});
+
+// Get Events
+app.get('/api/events', async (req, res) => {
+  try {
+    const eventsSnapshot = await db.collection('events').get();
+    const events = eventsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    res.json(events);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', details: err.message });
+  }
+});
+
+// Update Event
+app.post('/api/update-event', async (req, res) => {
   const { id, title, className } = req.body;
-  
+
   if (!id || !title || !className) {
-    console.log('UPDATE EVENT')
     return res.status(400).json({ error: 'Missing required fields' });
   }
-  
-  membersDb.run(
-    `UPDATE eventsTable 
-    SET title = ?, className = ? 
-    WHERE id = ?`,
-    [title, className, id],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to update event', details: err.message });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Event not found' });
-      }
-      res.status(200).json({ message: 'Event updated successfully' });
-    }
-  );
+
+  try {
+    await db.collection('events').doc(id).update({ title, className });
+    res.status(200).json({ message: 'Event updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update event', details: err.message });
+  }
 });
 
-
-app.delete('/api/delete-event/:id', (req, res) => {
+// Delete Event
+app.delete('/api/delete-event/:id', async (req, res) => {
   const { id } = req.params;
-  console.log('DELETE EVENT')
+
   if (!id) {
     return res.status(400).json({ error: 'Missing event ID' });
   }
 
-  membersDb.run(
-    `DELETE FROM eventsTable WHERE id = ?`,
-    [id],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to delete event', details: err.message });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Event not found' });
-      }
-      res.status(200).json({ message: 'Event deleted successfully' });
-    }
-  );
+  try {
+    await db.collection('events').doc(id).delete();
+    res.status(200).json({ message: 'Event deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete event', details: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
